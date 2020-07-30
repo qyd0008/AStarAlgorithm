@@ -1,0 +1,426 @@
+# Use the latest 2.1 version of CircleCI pipeline process engine. See: https://circleci.com/docs/2.0/configuration-reference
+version: 2.1
+# Use a package of configuration called an orb.
+orbs:
+  # Declare a dependency on the welcome-orb
+  welcome: circleci/welcome-orb@0.4.1
+# Orchestrate or schedule a set of jobs
+workflows:
+  # Name the workflow "welcome"
+  welcome:
+    # Run the welcome/run job in its own container
+    jobs:
+      - welcome/run
+      
+
+
+
+
+local AStar = require("app.AStar.AStar")
+
+local MainScene = class("MainScene", function()
+    return display.newScene("MainScene")
+end)
+
+function MainScene:ctor()
+	--哪些地方可以走
+	self.canWalk = {}
+	--地图
+	self.tileMap = cc.TMXTiledMap:create("map.tmx")
+		:addTo(self)
+	--地图层
+	self.myLayer = self.tileMap:getLayer("Background")
+	--对象层
+	local obj = self.tileMap:getObjectGroup("Object")
+	self.myobj = obj:getObject("SpawnPoint")
+	--根据对象层设置主角
+	self.myplayer = display.newSprite("Player.png")
+		:pos(self.myobj.x+16, self.myobj.y+16)
+		:addTo(self)
+	--触摸层
+	self.layerTouch = nil
+	--A*算法
+	self.astar = nil
+	--确定当前地图哪些地方不能走
+	self:getCanWalk()	
+	--添加一个触摸层
+	self:addTouchLayer()
+end
+
+function MainScene:onEnter()
+end
+
+function MainScene:onExit()
+end
+
+
+--设置屏幕触摸事件 即添加一个触摸层
+function MainScene:addTouchLayer()
+	local function onTouch(eventName, x, y)
+        if eventName == "began" then
+        	--取得坐标
+            local pos_x = math.ceil(x/32)-1	
+            local pos_y = math.abs((math.ceil(y/32)-30))
+            --取得canWalk的下标
+            local iscanWalk = pos_y*self.tileMap:getMapSize().width + pos_x + 1
+            --print(self.canWalk[iscanWalk])
+            if self.canWalk[iscanWalk] == 1 then
+            	--取得当前点
+            	local now_x = math.ceil(self.myplayer:getPositionX()/32) - 1
+            	local now_y = math.abs((math.ceil(self.myplayer:getPositionY()/32)-30))
+            	local startpos = cc.p(now_x,now_y)
+            	--取得终点
+            	local goalpos = cc.p(pos_x,pos_y)
+
+            	--如果A*算法已经启动了 精灵开始移动 但是还没移动结束 但是这时候又点了屏幕 此时应该停止这个移动精灵的定时器
+            	if self.astar ~= nil then
+            		--如果连续点击同一个点，没必要在执行算法了啊
+            		if self.astar:isClickSameGpalPos(startpos,goalpos) then
+            			return
+            		end
+            		self.astar:stopSchedulerRightNow()--立刻停止当前的定时器
+            	end
+            	--这个地方可以到达 准备进行A*算法
+            	print("I can arrival".." ("..pos_x..","..pos_y..")")
+            	self.astar = AStar.new(self.canWalk,self.tileMap:getMapSize().width,self.tileMap:getMapSize().height,self.myplayer)
+            	
+            	--开始启动A*算法
+            	print(self.astar:AStarAlgorithm(startpos,goalpos))
+            else
+            	--这个地方不可抵达 不作操作
+            	print("I can't arrival".." ("..pos_x..","..pos_y..")")
+            end
+        end
+    end
+    --创建触摸层
+    self.layerTouch = display.newLayer()
+    --添加触摸事件
+    self.layerTouch:addNodeEventListener(cc.NODE_TOUCH_EVENT, function(event)
+        return onTouch(event.name, event.x, event.y)
+    end)
+    --设置屏幕可触摸
+    self.layerTouch:setTouchEnabled(true)
+    --配置层的大小和窗口大小匹配
+    self.layerTouch:setPosition(cc.p(0,0))
+    self.layerTouch:setContentSize(display.width, display.height)
+    self:addChild(self.layerTouch, -5)
+end
+
+--确定当前地图哪些地方不能走！
+function MainScene:getCanWalk()
+	print(self.tileMap:getMapSize().width)
+	print(self.tileMap:getMapSize().height)
+
+	--注意 此次的遍历原点为左上角。不是OpenGL坐标系
+	for i=0,self.tileMap:getMapSize().height-1 do 
+		for j=0,self.tileMap:getMapSize().width-1 do
+			--获取这个点的32*32的GID
+	 		local gid = self.myLayer:getTileGIDAt(cc.p(j,i))
+	 		--获取这个GID的属性 我想获得canWalk 此处返回的是一个表
+	 		local TileProTable = self.tileMap:getPropertiesForGID(gid)
+	 		--因此遍历表
+	 		for k,v in pairs(TileProTable) do
+			 	print("GID:"..gid..", Properties:"..k..","..v)
+			 	--取得canWalk的值 （注意：即使你设计地图时添加的是bool类型的属性） 但是这里获取到的是string类型
+			 	if v == "true" then
+			 		table.insert(self.canWalk, 1)
+			 	else
+			 		table.insert(self.canWalk, 0)
+			 	end			 	
+			end
+	 	end
+	end	
+	--至此已经确定哪些地方不能走，不能走的地方为false
+	for m,n in pairs(self.canWalk) do
+		print(n..",")
+	end
+end
+
+
+
+return MainScene
+
+
+
+
+local AStar = class("AStar")
+
+--起始点坐标  终点坐标  是否可抵达表
+function AStar:ctor(canWalk,width,height,myplayer)
+    --记录传进来的属性 随后用
+    self.canWalk = canWalk
+    self.width = width
+    self.height = height
+    self.myplayer = myplayer
+
+    --记录所有被考虑来寻找最短路径的方块
+    self.openTable = {} 
+    -- 一一对应的表  
+    self.open_gscore = {}
+    self.open_hscore = {}--没有用到
+    self.open_fscore = {}
+
+    --记录下不会再被考虑的方块
+    self.closeTable = {}
+    -- 一一对应的表
+    self.close_gscore = {}
+    self.close_hscore = {}--没有用到
+    self.close_fscore = {}
+
+    --追溯表 记录所有考虑到的点  这个表特殊 k值不是123456789是点 v也是点 即 （自己的点（key）  ------  父亲点(value) ）
+    self.comaFrom = {}
+    --真实路线表 在追溯表中从终点开始一个个找父节点 直至起点  这里使用的时候要反转一下表 
+    self.realRoad = {}
+
+    --记录上一次的终点坐标
+    self.goalPos = nil
+    --定时器中使用
+    self.key_count = 1
+    self.schedulerID = nil  
+end
+
+function AStar:onExit()
+end
+
+function AStar:onEnter()
+end
+
+--在不考虑障碍物的情况下 取得f_score
+function AStar:getF_Score(nowPos,goalPos,g_score)
+    --hscore的值其实就是x1-x2 + y1-y2
+    local h_score = math.abs(nowPos.x - goalPos.x) + math.abs(nowPos.y - goalPos.y)
+    --f = g + h
+    local f_score = h_score + g_score
+    return f_score
+end
+
+
+
+--在OpenTable表中  谁的f_score最小呢？
+function AStar:f_scoreWhoIsSmallestInOpenTable()
+    --假设第一个点为最小值
+    local min = self.open_fscore[1]
+    local k_temp = 1
+    --遍历表
+    for k,v in pairs(self.open_fscore) do
+        --如果碰到更小的 记录下来
+        if v<min then
+            min = v 
+            k_temp = k
+        end
+    end
+    return k_temp  --返回table的key值 表示这个key值下的值在该表中最小
+end
+
+--open表中添加点
+function AStar:openableInster(pos,g_score,f_score)
+    --为了一一对应
+    table.insert(self.openTable,pos)
+    table.insert(self.open_gscore,g_score)
+    table.insert(self.open_fscore,f_score)
+end
+
+--open表中移除点
+function AStar:openTableRemove(who)
+    --为了一一对应
+    table.remove(self.openTable,who)
+    table.remove(self.open_gscore,who)
+    table.remove(self.open_fscore,who)
+end
+
+--close表中添加点
+function AStar:closeTableInster(current,g_score,f_score)
+    --为了一一对应
+    table.insert(self.closeTable,current)
+    table.insert(self.close_gscore,g_score)
+    table.insert(self.close_fscore,f_score)
+end
+
+--看看这个点是否在opentable里呢？
+function AStar:isThisPosExist(pos)
+    --假设不在
+    local bool = false
+    --遍历表
+    for k,v in pairs(self.openTable) do
+        if pos.x == v.x and pos.y == v.y then --原来你在啊~
+            bool = true
+        end
+    end
+    return bool
+end
+
+
+function AStar:operatingThisPos(pos,g_score,goalPos,current)
+    --如果这个点超出边界
+    if pos.x<0 or pos.y<0 or pos.x>=self.width or pos.y>=self.height then
+        return
+    end
+    --如果这个点不可以通过
+    local iscanWalk = pos.y*self.width + pos.x + 1
+    if self.canWalk[iscanWalk] == 0 then --canWalk在这里用到了
+        return 
+    end 
+    --如果这个点已经在closeTable中 那就不用做了啊  退出！退出！
+    for k,v in pairs(self.closeTable) do
+        if pos.x == v.x and pos.y == v.y then
+            return
+        end
+    end
+
+    --经过重重把关 接下来的点就要添加到追溯表里了 pos为孩子 current为父亲
+    self.comaFrom[pos] = current
+    --看看这个点是否在opentable里呢？
+    --如果在的话
+    if self:isThisPosExist(pos) == true then 
+        --我这里只有上下左右啊  好像用不到 ，但是如果45°的格子也可以走的话 这里就要做了
+        --具体做什么？
+        --对于相邻点在开启列表中的，计算相邻点的G值，计算按照当前路径的G值与原开启列表中的G值大小。
+        --如果当前路径G值小于原开启列表G值，则相邻点以当前点为父节点，将相邻点与当前点加入追溯表中。
+        --同时更新此相邻点的H值。如果当前路径G值大于等于原开启列表G值，则相邻点按照原开启列表中的节点关系，H值不变。
+    --如果不在的话
+    else
+        --加入到开启列表中
+        local f_score = self:getF_Score(pos,goalPos,g_score)
+        self:openableInster(pos,g_score,f_score)
+    end
+end
+
+--A*算法实现 参数为当前位置以及canWalk表
+function AStar:AStarAlgorithm(startPos,goalPos)
+    --你怎么可以传空值进来捏！！
+    if startPos == nil or goalPos == nil then
+        return false
+    end
+    
+    --记录终点坐标
+    self.goalPos = cc.p(goalPos.x,goalPos.y)
+    --1.将起始点加入开启列表（刚开始的时候只有起始点被考虑）
+    table.insert(self.openTable,startPos)
+
+    --初始gscore为0
+    local g_score = 0
+    table.insert(self.open_gscore,g_score)
+    local f_score = self:getF_Score(startPos,goalPos,g_score)
+    table.insert(self.open_fscore,f_score)
+
+    while #self.openTable ~= 0 do
+        --找到opentable中谁的fscore最小
+        local who = self:f_scoreWhoIsSmallestInOpenTable()
+        --先记录他为current
+        local current = self.openTable[who]
+        local current_gscore = self.open_gscore[who]
+        local current_fscore = self.open_fscore[who]
+        --在open有关的表中移除这个最小的  因为我要添加到close中去了
+        self:openTableRemove(who)
+        --添加到close表中
+        self:closeTableInster(current,current_gscore,current_fscore)
+        --开始环顾四周（上下左右） 看看自己的相邻节点怎么说
+        g_score = g_score + 1
+        --上 
+        local pos = cc.p(current.x,current.y+1)
+        self:operatingThisPos(pos,g_score,goalPos,current)
+        --下
+        pos = cc.p(current.x,current.y-1)
+        self:operatingThisPos(pos,g_score,goalPos,current)
+        --左
+        pos = cc.p(current.x-1,current.y)
+        self:operatingThisPos(pos,g_score,goalPos,current)
+        --右
+        pos = cc.p(current.x+1,current.y)
+        self:operatingThisPos(pos,g_score,goalPos,current)
+
+        --如果终点在开启列表中
+        if self:isThisPosExist(goalPos) then
+            table.insert(self.closeTable,goalPos)
+            --打印出来这条线上的点
+            for k,v in pairs(self.closeTable) do
+                print(v.x,v.y)
+            end
+            --根据追溯表来获取真实路径
+            self:getRealRoad(startPos,goalPos)
+            --反转真正路线
+            self.realRoad = self:reverseTable(self.realRoad)
+            --开启定时器让精灵运动
+            local scheduler = cc.Director:getInstance():getScheduler()  
+            self.schedulerID = scheduler:scheduleScriptFunc(handler(self,self.movePlayer),0.1,false)  
+            return true
+        end
+    end
+    return false
+end
+
+--获取真正的路线
+function AStar:getRealRoad(startPos,goalPos)
+    --local ptemp = goalPos
+    --这不就是遍历链表么  ptemp用到了  此时等于终点
+    local ptemp = cc.p(goalPos.x,goalPos.y)
+    --直至遍历到起点
+    while ((ptemp.x ~= startPos.x) or (ptemp.y ~= startPos.y)) do
+        --先添加进真正的路线表里  此时加完是倒叙的
+        table.insert(self.realRoad,ptemp)
+        --开始遍历表
+        for k,v in pairs(self.comaFrom) do
+            --找到与ptemp值相同的k值 
+            if k.x == ptemp.x and k.y == ptemp.y then
+                print("k :"..k.x..k.y)
+                --ptemp新的值是自己的父节点
+                ptemp = cc.p(v.x,v.y)
+                print("ptemp :"..ptemp.x..ptemp.y)
+                break
+            end
+        end
+    end
+end
+
+--反转表
+function AStar:reverseTable(tab)  
+    local tmp = {}  
+    for i = 1, #tab do  
+        local key = #tab  
+        --remove原来返回值是删除的点啊
+        tmp[i] = table.remove(tab)  --remove只传table名 删除最后一个
+    end 
+    return tmp  
+end  
+
+--定时器函数
+function AStar:movePlayer()  
+    --定时器每运行一次这个函数 点就要变啊  不然怎么移动 其实就是定时器遍历self.realRoad表
+    local v = self.realRoad[self.key_count]
+    self.key_count = self.key_count+1
+    if v ~= nil then
+        --设置精灵的位置
+        self.myplayer:setPositionY((29-v.y)*32 +16)
+        self.myplayer:setPositionX(v.x*32 + 16)
+    else
+        --为空值说明遍历完了  那就停止吧
+        --self.goalPos = nil
+        cc.Director:getInstance():getScheduler():unscheduleScriptEntry(self.schedulerID) 
+    end 
+end
+
+--立刻停止定时器
+function AStar:stopSchedulerRightNow()
+    --self.goalPos = nil
+    cc.Director:getInstance():getScheduler():unscheduleScriptEntry(self.schedulerID)
+end
+
+--这个终点还是上一次的点吗？防止在同一个点不断点击，多次运行算法，降低效率
+function AStar:isClickSameGpalPos(startPos,goalPos)  
+    if self.goalPos ~= nil then
+        --根本不需要走啊 点自己干啥
+        if startPos.x == goalPos.x and startPos.y == goalPos.y then
+            print("你已经在这个点了啊！")
+            return true
+        end
+        --着急啥呢
+        if self.goalPos.x == goalPos.x and self.goalPos.y == goalPos.y then
+            print("别再点同一个点了！我马上就到了")
+            return true
+        end
+    end
+    return false
+end
+
+return AStar
+
